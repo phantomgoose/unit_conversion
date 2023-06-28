@@ -27,6 +27,19 @@ struct Node {
     edges: Vec<Edge>,
 }
 
+#[derive(Debug, PartialEq)]
+struct ConvertedUnit(Option<f32>);
+
+impl ToString for ConvertedUnit {
+    fn to_string(&self) -> String {
+        if let Some(value) = self.0 {
+            format!("answer = {}", value)
+        } else {
+            "not convertible!".to_string()
+        }
+    }
+}
+
 struct ConversionGraph {
     // a map of units to respective entrypoint nodes for O(1) lookups
     node_map: HashMap<String, Arc<RefCell<Node>>>,
@@ -108,7 +121,7 @@ impl ConversionGraph {
         None
     }
 
-    fn convert(&self, query: Conversion) -> String {
+    fn convert(&self, query: Conversion) -> ConvertedUnit {
         let from_node = self.node_map.get(query.from.as_str());
         if let Some(path) = Self::traverse(
             from_node,
@@ -116,13 +129,13 @@ impl ConversionGraph {
             Vec::new(),
             &mut HashSet::new(),
         ) {
-            let converted_value = path
+            let res = path
                 .iter()
                 .fold(query.value, |acc, edge| acc * edge.conversion_rate);
-            return format!("answer = {}", converted_value);
+            ConvertedUnit(Some(res))
+        } else {
+            ConvertedUnit(None)
         }
-
-        "not convertible!".to_string()
     }
 }
 
@@ -146,14 +159,17 @@ fn main() {
         Conversion::new("hr".to_string(), "min".to_string(), 60.0),
         Conversion::new("min".to_string(), "sec".to_string(), 60.0),
     ]);
-    let res = graph.convert(Conversion::new("m".to_string(), "in".to_string(), 2.0));
+    let res = graph
+        .convert(Conversion::new("m".to_string(), "in".to_string(), 2.0))
+        .to_string();
     dbg!(res);
 }
 
 #[cfg(test)]
 mod tests {
     mod convert {
-        use crate::{Conversion, ConversionGraph};
+        use crate::{Conversion, ConversionGraph, ConvertedUnit};
+        use approx::assert_relative_eq;
 
         fn create_test_graph() -> ConversionGraph {
             ConversionGraph::new(vec![
@@ -169,7 +185,7 @@ mod tests {
             let graph = create_test_graph();
             let res = graph.convert(Conversion::new("m".to_string(), "in".to_string(), 2.0));
 
-            assert_eq!(res, "answer = 78.72");
+            assert_relative_eq!(res.0.unwrap(), 78.72);
         }
 
         #[test]
@@ -177,7 +193,15 @@ mod tests {
             let graph = create_test_graph();
             let res = graph.convert(Conversion::new("in".to_string(), "m".to_string(), 13.0));
 
-            assert_eq!(res, "answer = 0.33028457");
+            assert_relative_eq!(res.0.unwrap(), 0.33028457);
+        }
+
+        #[test]
+        fn it_works_for_sec_to_hr() {
+            let graph = create_test_graph();
+            let res = graph.convert(Conversion::new("sec".to_string(), "hr".to_string(), 3600.0));
+
+            assert_relative_eq!(res.0.unwrap(), 1.0);
         }
 
         #[test]
@@ -185,7 +209,7 @@ mod tests {
             let graph = create_test_graph();
             let res = graph.convert(Conversion::new("in".to_string(), "hr".to_string(), 13.0));
 
-            assert_eq!(res, "not convertible!");
+            assert_eq!(res, ConvertedUnit(None));
         }
     }
 }
