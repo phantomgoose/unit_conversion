@@ -12,7 +12,7 @@
  */
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Default, Clone)]
@@ -37,25 +37,35 @@ impl ConversionGraph {
         let mut node_map: HashMap<String, Arc<RefCell<Node>>> = HashMap::new();
 
         facts.iter().for_each(|fact| {
-            let destination = node_map
+            node_map
                 .entry(fact.to.clone())
                 .or_insert(Arc::new(RefCell::new(Node {
                     unit: fact.to.clone(),
                     edges: Vec::default(),
-                })))
-                .clone();
+                })));
 
-            let node = node_map
+            node_map
                 .entry(fact.from.clone())
                 .or_insert(Arc::new(RefCell::new(Node {
                     unit: fact.from.clone(),
                     edges: Vec::default(),
                 })));
+        });
 
-            node.borrow_mut().edges.push(Edge {
-                conversion_rate: fact.value,
-                to: destination,
-            });
+        facts.iter().for_each(|fact| {
+            if let (Some(origin), Some(destination)) =
+                (node_map.get(&fact.from), node_map.get(&fact.to))
+            {
+                destination.borrow_mut().edges.push(Edge {
+                    conversion_rate: 1.0 / fact.value,
+                    to: origin.clone(),
+                });
+
+                origin.borrow_mut().edges.push(Edge {
+                    conversion_rate: fact.value,
+                    to: destination.clone(),
+                });
+            }
         });
 
         ConversionGraph { node_map }
@@ -63,8 +73,9 @@ impl ConversionGraph {
 
     fn traverse(
         curr_node: Option<&Arc<RefCell<Node>>>,
-        search_string: String,
+        search_string: &str,
         path: Vec<Edge>,
+        seen_units: &mut HashSet<String>,
     ) -> Option<Vec<Edge>> {
         if curr_node?.borrow().unit == search_string {
             // found target
@@ -76,11 +87,19 @@ impl ConversionGraph {
             return None;
         }
 
+        let curr_unit = &*curr_node?.borrow().unit;
+        if seen_units.contains(curr_unit) {
+            // cycle
+            return None;
+        }
+
+        seen_units.insert(curr_unit.to_string());
+
         for edge in &curr_node?.borrow().edges {
             let mut new_result = path.clone();
             new_result.push(edge.clone());
             if let Some(possible_path) =
-                Self::traverse(Some(&edge.to), search_string.clone(), new_result)
+                Self::traverse(Some(&edge.to), search_string, new_result, seen_units)
             {
                 return Some(possible_path);
             }
@@ -91,7 +110,12 @@ impl ConversionGraph {
 
     fn convert(&self, query: Conversion) -> String {
         let from_node = self.node_map.get(query.from.as_str());
-        if let Some(path) = Self::traverse(from_node, query.to, Vec::new()) {
+        if let Some(path) = Self::traverse(
+            from_node,
+            query.to.as_str(),
+            Vec::new(),
+            &mut HashSet::new(),
+        ) {
             let converted_value = path
                 .iter()
                 .fold(query.value, |acc, edge| acc * edge.conversion_rate);
@@ -153,7 +177,7 @@ mod tests {
             let graph = create_test_graph();
             let res = graph.convert(Conversion::new("in".to_string(), "m".to_string(), 13.0));
 
-            assert_eq!(res, "answer = 0.33");
+            assert_eq!(res, "answer = 0.33028457");
         }
 
         #[test]
