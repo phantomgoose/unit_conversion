@@ -31,7 +31,7 @@ lazy_static! {
 }
 
 lazy_static! {
-    static ref TEST_GRAPH: ConversionGraph<'static> = ConversionGraph::new(vec![
+    static ref TEST_GRAPH: ConversionGraph = ConversionGraph::new(vec![
         Conversion::new("m", "ft", 3.28),
         Conversion::new("ft", "in", 12.0),
         Conversion::new("hr", "min", 60.0),
@@ -40,10 +40,10 @@ lazy_static! {
 }
 
 #[derive(Default, Clone)]
-struct ThreadSafeNode<'a>(Arc<RwLock<Node<'a>>>);
+struct ThreadSafeNode(Arc<RwLock<Node>>);
 
-impl<'a> From<Unit<'a>> for ThreadSafeNode<'a> {
-    fn from(unit: Unit<'a>) -> Self {
+impl From<Unit> for ThreadSafeNode {
+    fn from(unit: Unit) -> Self {
         ThreadSafeNode(Arc::new(RwLock::new(Node {
             unit,
             edges: Vec::new(),
@@ -51,37 +51,37 @@ impl<'a> From<Unit<'a>> for ThreadSafeNode<'a> {
     }
 }
 
-impl<'a> ThreadSafeNode<'a> {
-    fn add_edge(&self, edge: Edge<'a>) {
+impl ThreadSafeNode {
+    fn add_edge(&self, edge: Edge) {
         let err_msg = "Nodes should be writeable when adding edges";
         self.0.write().expect(err_msg).edges.push(edge);
     }
 }
 
 #[derive(Default, Clone)]
-struct Edge<'a> {
+struct Edge {
     conversion_rate: f32,
-    to: ThreadSafeNode<'a>,
+    to: ThreadSafeNode,
 }
 
 #[derive(Default)]
-struct Node<'a> {
-    unit: Unit<'a>,
-    edges: Vec<Edge<'a>>,
+struct Node {
+    unit: Unit,
+    edges: Vec<Edge>,
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Unit<'a>(&'a str);
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
+struct Unit(String);
 
-impl<'a> From<&'a str> for Unit<'a> {
-    fn from(value: &'a str) -> Self {
+impl From<&str> for Unit {
+    fn from(value: &str) -> Self {
         assert!(
             VALID_UNITS.contains(value),
             "Received invalid unit value {}",
             value
         );
 
-        Unit(value)
+        Unit(value.to_string())
     }
 }
 
@@ -98,20 +98,20 @@ impl ToString for ConvertedValue {
     }
 }
 
-struct ConversionGraph<'a> {
+struct ConversionGraph {
     // a map of units to respective entrypoint nodes for O(1) lookups for the first node in a conversion chain
-    nodes: HashMap<Unit<'a>, ThreadSafeNode<'a>>,
+    nodes: HashMap<Unit, ThreadSafeNode>,
 }
 
-impl<'a> ConversionGraph<'a> {
-    fn new(facts: Vec<Conversion<'a>>) -> Self {
+impl ConversionGraph {
+    fn new(facts: Vec<Conversion>) -> Self {
         let mut node_map: HashMap<Unit, ThreadSafeNode> = HashMap::new();
 
         // create a map of our unit -> Node pairs
         facts.iter().for_each(|fact| {
-            node_map.insert(fact.to, ThreadSafeNode::from(fact.to));
+            node_map.insert(fact.to.clone(), ThreadSafeNode::from(fact.to.clone()));
 
-            node_map.insert(fact.from, ThreadSafeNode::from(fact.from));
+            node_map.insert(fact.from.clone(), ThreadSafeNode::from(fact.from.clone()));
         });
 
         // create the edges between our unit nodes to capture conversion rate information
@@ -125,7 +125,7 @@ impl<'a> ConversionGraph<'a> {
                 });
 
                 destination.add_edge(Edge {
-                    // conversion rate from destination to origin is an inverse of the given rate
+                    // conversion rate from destination to origin is the inverse of the given rate
                     conversion_rate: 1.0 / fact.value,
                     to: origin.clone(),
                 });
@@ -135,12 +135,12 @@ impl<'a> ConversionGraph<'a> {
         ConversionGraph { nodes: node_map }
     }
 
-    fn traverse<'b>(
-        curr_node: Option<&ThreadSafeNode<'b>>,
+    fn traverse(
+        curr_node: Option<&ThreadSafeNode>,
         target_unit: Unit,
-        path: Vec<Edge<'b>>,
-        visited: &mut HashSet<Unit<'b>>,
-    ) -> Option<Vec<Edge<'b>>> {
+        path: Vec<Edge>,
+        visited: &mut HashSet<Unit>,
+    ) -> Option<Vec<Edge>> {
         let read_failure_msg = "read access to nodes during traversal should always be possible";
 
         let node = curr_node?.0.read().expect(read_failure_msg);
@@ -154,7 +154,7 @@ impl<'a> ConversionGraph<'a> {
             return None;
         }
 
-        let curr_unit = node.unit;
+        let curr_unit = node.unit.clone();
         if visited.contains(&curr_unit) {
             // detected a cycle in the current branch before getting to the target unit
             return None;
@@ -167,7 +167,7 @@ impl<'a> ConversionGraph<'a> {
             let mut updated_path = path.clone();
             updated_path.push(edge.clone());
             if let Some(possible_path) =
-                Self::traverse(Some(&edge.to), target_unit, updated_path, visited)
+                Self::traverse(Some(&edge.to), target_unit.clone(), updated_path, visited)
             {
                 return Some(possible_path);
             }
@@ -190,14 +190,14 @@ impl<'a> ConversionGraph<'a> {
 }
 
 #[derive(Debug)]
-struct Conversion<'a> {
-    from: Unit<'a>,
-    to: Unit<'a>,
+struct Conversion {
+    from: Unit,
+    to: Unit,
     value: f32,
 }
 
-impl<'a> Conversion<'a> {
-    fn new(from: &'a str, to: &'a str, value: f32) -> Self {
+impl Conversion {
+    fn new(from: &str, to: &str, value: f32) -> Self {
         Conversion {
             from: Unit::from(from),
             to: Unit::from(to),
