@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod convert {
+mod test_convert {
     use approx::assert_relative_eq;
 
     use crate::{ConversionResult, UnitConversion, TEST_GRAPH};
