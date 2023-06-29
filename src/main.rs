@@ -18,7 +18,7 @@
 */
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, Weak};
 
 use lazy_static::lazy_static;
 
@@ -57,6 +57,17 @@ impl From<Unit> for ArcVertex {
     }
 }
 
+impl From<&Edge> for ArcVertex {
+    fn from(value: &Edge) -> Self {
+        ArcVertex(
+            value
+                .to
+                .upgrade()
+                .expect("Vertices should exist as long as the graph itself hasn't been dropped."),
+        )
+    }
+}
+
 impl ArcVertex {
     /// Adds an edge to the [`Vertex`][Vertex]
     fn add_edge(&self, edge: Edge) {
@@ -69,6 +80,13 @@ impl ArcVertex {
         let err_msg = "Attempted to read from a poisoned RwLock.";
         self.0.read().expect(err_msg)
     }
+
+    /// Helper method for getting a weak reference to the underlying [`Vertex`][Vertex]. Useful when
+    /// creating [`Edges`][Edge], where keeping strong [`Arc`][Arc] references to graph vertices
+    /// would lead to circular references that never get cleaned up, and thus memory leaks.
+    fn weak_ref(&self) -> Weak<RwLock<Vertex>> {
+        Arc::downgrade(&self.0)
+    }
 }
 
 /// Edges connect a [`Vertex`][Vertex] to another `Vertex`.
@@ -76,7 +94,7 @@ impl ArcVertex {
 #[derive(Default, Clone)]
 struct Edge {
     conversion_rate: f32,
-    to: ArcVertex,
+    to: Weak<RwLock<Vertex>>,
 }
 
 /// Graph vertex, containing the conversion [`Unit`][Unit].
@@ -147,13 +165,13 @@ impl ConversionGraph {
             {
                 origin.add_edge(Edge {
                     conversion_rate: fact.value,
-                    to: destination.clone(),
+                    to: destination.weak_ref(),
                 });
 
                 destination.add_edge(Edge {
                     // conversion rate from destination to origin is the inverse of the given rate
                     conversion_rate: 1.0 / fact.value,
-                    to: origin.clone(),
+                    to: origin.weak_ref(),
                 });
             }
         });
@@ -205,9 +223,12 @@ impl ConversionGraph {
         for edge in &vertex.edges {
             let mut updated_path = path.clone();
             updated_path.push(edge.clone());
-            if let Some(possible_path) =
-                Self::traverse(Some(&edge.to), target_unit.clone(), updated_path, visited)
-            {
+            if let Some(possible_path) = Self::traverse(
+                Some(&edge.into()),
+                target_unit.clone(),
+                updated_path,
+                visited,
+            ) {
                 return Some(possible_path);
             }
         }
