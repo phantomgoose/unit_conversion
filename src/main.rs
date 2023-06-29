@@ -18,9 +18,11 @@
 */
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use lazy_static::lazy_static;
+
+mod tests;
 
 // Rust has no support for complex constant initialization (since constants are initialized at
 // compile time), so we're using the lazy_static crate here to lazily init our set of supported
@@ -32,48 +34,66 @@ lazy_static! {
 
 lazy_static! {
     static ref TEST_GRAPH: ConversionGraph = ConversionGraph::new(vec![
-        Conversion::new("m", "ft", 3.28),
-        Conversion::new("ft", "in", 12.0),
-        Conversion::new("hr", "min", 60.0),
-        Conversion::new("min", "sec", 60.0),
+        UnitConversion::new("m", "ft", 3.28),
+        UnitConversion::new("ft", "in", 12.0),
+        UnitConversion::new("hr", "min", 60.0),
+        UnitConversion::new("min", "sec", 60.0),
     ]);
 }
 
+/// A [`Vertex`][Vertex] behind an [`Arc`][Arc] reference counting and thread-safe pointer.
+/// This allows safe (at runtime) shared access from multiple origin Vertices to the same
+/// destination Vertex.
 #[derive(Default, Clone)]
-struct ThreadSafeNode(Arc<RwLock<Node>>);
+struct ArcVertex(Arc<RwLock<Vertex>>);
 
-impl From<Unit> for ThreadSafeNode {
+impl From<Unit> for ArcVertex {
+    /// Helper method for creating a new [`ArcVertex`][ArcVertex] for a given [`Unit`][Unit]
     fn from(unit: Unit) -> Self {
-        ThreadSafeNode(Arc::new(RwLock::new(Node {
+        ArcVertex(Arc::new(RwLock::new(Vertex {
             unit,
             edges: Vec::new(),
         })))
     }
 }
 
-impl ThreadSafeNode {
+impl ArcVertex {
+    /// Adds an edge to the [`Vertex`][Vertex]
     fn add_edge(&self, edge: Edge) {
-        let err_msg = "Nodes should be writeable when adding edges";
-        self.0.write().expect(err_msg).edges.push(edge);
+        let write_err_msg = "Vertices should be writeable while edges are being added.";
+        self.0.write().expect(write_err_msg).edges.push(edge);
+    }
+
+    /// Helper method for getting the [`Vertex`][Vertex] behind the [`Arc`][Arc] pointer
+    fn get_vertex(&self) -> RwLockReadGuard<Vertex> {
+        let err_msg = "Attempted to read from a poisoned RwLock.";
+        self.0.read().expect(err_msg)
     }
 }
 
+/// Edges connect a [`Vertex`][Vertex] to another `Vertex`.
+/// Each edge also contains the conversion rate between the source and the destination vertices.
 #[derive(Default, Clone)]
 struct Edge {
     conversion_rate: f32,
-    to: ThreadSafeNode,
+    to: ArcVertex,
 }
 
+/// Graph vertex, containing the conversion [`Unit`][Unit].
 #[derive(Default)]
-struct Node {
+struct Vertex {
     unit: Unit,
     edges: Vec<Edge>,
 }
 
+/// Struct representing our conversion units.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 struct Unit(String);
 
 impl From<&str> for Unit {
+    /// Helper functionality for converting str slices to [`Unit`][Unit]s.
+    /// Performs basic validation on the provided string (i.e. it must be one of the known unit
+    /// types).
     fn from(value: &str) -> Self {
         assert!(
             VALID_UNITS.contains(value),
@@ -86,9 +106,10 @@ impl From<&str> for Unit {
 }
 
 #[derive(Debug, PartialEq)]
-struct ConvertedValue(Option<f32>);
+struct ConversionResult(Option<f32>);
 
-impl ToString for ConvertedValue {
+impl ToString for ConversionResult {
+    /// Format the conversion result in accordance with the interview examples
     fn to_string(&self) -> String {
         if let Some(value) = self.0 {
             format!("answer = {}", value)
@@ -98,26 +119,31 @@ impl ToString for ConvertedValue {
     }
 }
 
+/// Captures information about the provided units and conversion rates between them
 struct ConversionGraph {
-    // a map of units to respective entrypoint nodes for O(1) lookups for the first node in a conversion chain
-    nodes: HashMap<Unit, ThreadSafeNode>,
+    // a map of units to respective entrypoint vertices for O(1) lookups for the first vertex in a conversion chain
+    vertices: HashMap<Unit, ArcVertex>,
 }
 
 impl ConversionGraph {
-    fn new(facts: Vec<Conversion>) -> Self {
-        let mut node_map: HashMap<Unit, ThreadSafeNode> = HashMap::new();
+    /// Creates a new graph to capture relationships between unit conversion facts,
+    /// which can then be used to answer queries via [`convert`][convert].
+    ///
+    /// [convert]: ConversionGraph::convert
+    pub fn new(facts: Vec<UnitConversion>) -> Self {
+        let mut vertex_map: HashMap<Unit, ArcVertex> = HashMap::new();
 
-        // create a map of our unit -> Node pairs
+        // create a map of our unit -> Vertex pairs
         facts.iter().for_each(|fact| {
-            node_map.insert(fact.to.clone(), ThreadSafeNode::from(fact.to.clone()));
+            vertex_map.insert(fact.to.clone(), ArcVertex::from(fact.to.clone()));
 
-            node_map.insert(fact.from.clone(), ThreadSafeNode::from(fact.from.clone()));
+            vertex_map.insert(fact.from.clone(), ArcVertex::from(fact.from.clone()));
         });
 
-        // create the edges between our unit nodes to capture conversion rate information
+        // create the edges between our unit vertices to capture conversion rate information
         facts.iter().for_each(|fact| {
             if let (Some(origin), Some(destination)) =
-                (node_map.get(&fact.from), node_map.get(&fact.to))
+                (vertex_map.get(&fact.from), vertex_map.get(&fact.to))
             {
                 origin.add_edge(Edge {
                     conversion_rate: fact.value,
@@ -132,29 +158,42 @@ impl ConversionGraph {
             }
         });
 
-        ConversionGraph { nodes: node_map }
+        ConversionGraph {
+            vertices: vertex_map,
+        }
     }
 
+    /// Traverse the graph looking for the vertex containing the target unit
+    ///
+    /// # Arguments
+    ///
+    /// * `curr_vertex`: Current graph vertex that we're on (or started with)
+    /// * `target_unit`: Search target
+    /// * `path`: Path taken so far
+    /// * `visited`: Tracker for visited vertices. We keep a set of seen units rather than vertices
+    /// themselves, because hashing vertices has some
+    /// [additional challenges](https://github.com/rust-lang/rust/issues/39128).
+    ///
+    /// returns: Option<Vec<Edge, Global>>
     fn traverse(
-        curr_node: Option<&ThreadSafeNode>,
+        curr_vertex: Option<&ArcVertex>,
         target_unit: Unit,
         path: Vec<Edge>,
         visited: &mut HashSet<Unit>,
     ) -> Option<Vec<Edge>> {
-        let read_failure_msg = "read access to nodes during traversal should always be possible";
+        let vertex = curr_vertex?.get_vertex();
 
-        let node = curr_node?.0.read().expect(read_failure_msg);
-        if node.unit == target_unit {
+        if vertex.unit == target_unit {
             // found the target
             return Some(path);
         }
 
-        if node.edges.is_empty() {
+        if vertex.edges.is_empty() {
             // target does not exist in the current branch
             return None;
         }
 
-        let curr_unit = node.unit.clone();
+        let curr_unit = vertex.unit.clone();
         if visited.contains(&curr_unit) {
             // detected a cycle in the current branch before getting to the target unit
             return None;
@@ -163,7 +202,7 @@ impl ConversionGraph {
         visited.insert(curr_unit);
 
         // TODO: remove recursion, which makes things rather confusing
-        for edge in &node.edges {
+        for edge in &vertex.edges {
             let mut updated_path = path.clone();
             updated_path.push(edge.clone());
             if let Some(possible_path) =
@@ -176,29 +215,34 @@ impl ConversionGraph {
         None
     }
 
-    fn convert(&self, query: Conversion) -> ConvertedValue {
-        let from_node = self.nodes.get(&query.from);
-        if let Some(path) = Self::traverse(from_node, query.to, Vec::new(), &mut HashSet::new()) {
+    /// Attempts to perform the requested unit conversion based on the graph of factuals that we have.
+    pub fn convert(&self, query: UnitConversion) -> ConversionResult {
+        let starting_vertex = self.vertices.get(&query.from);
+        if let Some(path) =
+            Self::traverse(starting_vertex, query.to, Vec::new(), &mut HashSet::new())
+        {
             let res = path
                 .iter()
                 .fold(query.value, |acc, edge| acc * edge.conversion_rate);
-            ConvertedValue(Some(res))
+            ConversionResult(Some(res))
         } else {
-            ConvertedValue(None)
+            ConversionResult(None)
         }
     }
 }
 
+/// Represents a unit conversion (whether a known factual or a query)
 #[derive(Debug)]
-struct Conversion {
+struct UnitConversion {
     from: Unit,
     to: Unit,
     value: f32,
 }
 
-impl Conversion {
+impl UnitConversion {
+    /// Helper for initializing a `UnitConversion` from str slices
     fn new(from: &str, to: &str, value: f32) -> Self {
-        Conversion {
+        UnitConversion {
             from: Unit::from(from),
             to: Unit::from(to),
             value,
@@ -206,46 +250,10 @@ impl Conversion {
     }
 }
 
+// simple scenario for cargo run
 fn main() {
     let res = TEST_GRAPH
-        .convert(Conversion::new("min", "sec", 2.0))
+        .convert(UnitConversion::new("min", "sec", 2.0))
         .to_string();
     dbg!(res);
-}
-
-#[cfg(test)]
-mod tests {
-    mod convert {
-        use approx::assert_relative_eq;
-
-        use crate::{Conversion, ConvertedValue, TEST_GRAPH};
-
-        #[test]
-        fn it_works_for_m_to_in() {
-            let res = TEST_GRAPH.convert(Conversion::new("m", "in", 2.0));
-
-            assert_relative_eq!(res.0.unwrap(), 78.72);
-        }
-
-        #[test]
-        fn it_works_for_in_to_m() {
-            let res = TEST_GRAPH.convert(Conversion::new("in", "m", 13.0));
-
-            assert_relative_eq!(res.0.unwrap(), 0.33028457);
-        }
-
-        #[test]
-        fn it_works_for_sec_to_hr() {
-            let res = TEST_GRAPH.convert(Conversion::new("sec", "hr", 3600.0));
-
-            assert_relative_eq!(res.0.unwrap(), 1.0);
-        }
-
-        #[test]
-        fn it_correctly_does_not_work_for_in_to_hr() {
-            let res = TEST_GRAPH.convert(Conversion::new("in", "hr", 13.0));
-
-            assert_eq!(res, ConvertedValue(None));
-        }
-    }
 }
