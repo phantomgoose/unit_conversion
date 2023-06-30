@@ -1,22 +1,3 @@
-/*
-* The goal is to create a function that allows unit conversions given an initial set of facts.
-* See the following video: https://youtu.be/V8DGdPkBBxg
-
-* example facts:
-* m = 3.28 ft
-* ft = 12 in
-* hr = 60 min
-* min = 60 sec
-*
-* example queries:
-* 2 m = ? in --> answer = 78.72
-* 13 in = ? m --> answer = 0.330 (roughly)
-* 13 in = ? hr --> "not convertible!"
-*
-* For our solution, we're going to implement a graph to capture the relationships between the known Units
-* with conversion rates stored as part of the edge metadata.
-*/
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard, Weak};
 
