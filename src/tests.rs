@@ -2,7 +2,8 @@
 mod test_convert {
     use approx::assert_relative_eq;
 
-    use crate::{ConversionResult, UnitConversion, TEST_GRAPH};
+    use crate::conversion::ConversionResult;
+    use crate::{UnitConversion, TEST_GRAPH};
 
     #[test]
     fn it_works_for_m_to_in() {
