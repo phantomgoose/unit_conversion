@@ -101,26 +101,31 @@ where
         let mut vertex_map: HashMap<T, ArcVertex<T>> = HashMap::new();
 
         // create a map of our Vertex pairs
-        connections.iter().for_each(|fact| {
-            vertex_map.insert(fact.to.clone(), ArcVertex::from(fact.to.clone()));
+        connections.iter().for_each(|connection| {
+            vertex_map
+                .entry(connection.to.clone())
+                .or_insert_with(|| ArcVertex::from(connection.to.clone()));
 
-            vertex_map.insert(fact.from.clone(), ArcVertex::from(fact.from.clone()));
+            vertex_map
+                .entry(connection.from.clone())
+                .or_insert_with(|| ArcVertex::from(connection.from.clone()));
         });
 
         // create the edges between our vertices
-        connections.iter().for_each(|fact| {
-            if let (Some(origin), Some(destination)) =
-                (vertex_map.get(&fact.from), vertex_map.get(&fact.to))
-            {
+        connections.iter().for_each(|connection| {
+            if let (Some(origin), Some(destination)) = (
+                vertex_map.get(&connection.from),
+                vertex_map.get(&connection.to),
+            ) {
                 origin.add_edge(Edge {
-                    weight: fact.value,
+                    weight: connection.value,
                     to: destination.weak_ref(),
                 });
 
                 destination.add_edge(Edge {
                     // assume the weight from destination to origin is the inverse of the given one
                     // TODO: we could allow the caller of `new` to specify how to determine weights
-                    weight: 1.0 / fact.value,
+                    weight: 1.0 / connection.value,
                     to: origin.weak_ref(),
                 });
             }
