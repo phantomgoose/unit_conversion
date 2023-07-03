@@ -1,12 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Debug;
 use std::hash::Hash;
+use std::iter::once;
 use std::sync::{Arc, RwLock, RwLockReadGuard, Weak};
 
 /// A [`Vertex`][Vertex] behind an [`Arc`][Arc] reference counting and thread-safe pointer.
 /// This allows safe (at runtime) shared access from multiple origin Vertices to the same
 /// destination Vertex.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct ArcVertex<T>(Arc<RwLock<Vertex<T>>>);
+
+type WeakVertex<T> = Weak<RwLock<Vertex<T>>>;
 
 impl<T> From<T> for ArcVertex<T> {
     /// Helper method for creating a new [`ArcVertex`][ArcVertex] from a given generic value
@@ -36,7 +40,7 @@ impl<T> ArcVertex<T> {
     }
 
     /// Helper method for getting the [`Vertex`][Vertex] behind the [`Arc`][Arc] pointer
-    fn get_vertex(&self) -> RwLockReadGuard<Vertex<T>> {
+    fn read_lock(&self) -> RwLockReadGuard<Vertex<T>> {
         let err_msg = "Attempted to read from a poisoned RwLock.";
         self.0.read().expect(err_msg)
     }
@@ -44,7 +48,7 @@ impl<T> ArcVertex<T> {
     /// Helper method for getting a weak reference to the underlying [`Vertex`][Vertex]. Useful when
     /// creating [`Edges`][Edge], where keeping strong references to graph vertices
     /// would lead to circular references that never get cleaned up, and thus memory leaks.
-    fn weak_ref(&self) -> Weak<RwLock<Vertex<T>>> {
+    fn weak_ref(&self) -> WeakVertex<T> {
         Arc::downgrade(&self.0)
     }
 }
@@ -52,14 +56,14 @@ impl<T> ArcVertex<T> {
 /// Edges connect a [`Vertex`][Vertex] to another `Vertex`.
 /// Each edge also contains a weight and weak pointer to the destination vertex. A weak pointer is
 /// useful here, because a strong one would prevent vertices from ever being dropped.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct Edge<T> {
     weight: f32,
-    to: Weak<RwLock<Vertex<T>>>,
+    to: WeakVertex<T>,
 }
 
 /// Graph vertex, containing a value and a vector of edges
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Vertex<T> {
     value: T,
     edges: Vec<Edge<T>>,
@@ -76,7 +80,7 @@ where
 
 impl<T> Connection<T>
 where
-    T: Hash + Eq + PartialEq + Clone,
+    T: Hash + Eq + PartialEq + Clone + Debug,
 {
     pub fn new(from: T, to: T, value: f32) -> Self {
         Self { from, to, value }
@@ -90,7 +94,7 @@ pub struct Graph<T> {
 
 impl<T> Graph<T>
 where
-    T: Hash + Eq + PartialEq + Clone,
+    T: Hash + Eq + PartialEq + Clone + Debug,
 {
     /// Helper method for creating a graph from a vec of connections
     pub fn new(connections: Vec<Connection<T>>) -> Self {
@@ -127,65 +131,49 @@ where
         }
     }
 
-    /// Recursively traverse the graph looking for the vertex containing the target value
-    ///
-    /// # Arguments
-    ///
-    /// * `curr_vertex`: Current graph vertex that we're on (or started with)
-    /// * `target_value`: Search target
-    /// * `path`: Path taken so far
-    /// * `visited`: Tracker for visited vertices. We keep a set of seen values rather than vertices
-    /// themselves, because hashing vertices has some
-    /// [additional challenges](https://github.com/rust-lang/rust/issues/39128).
-    fn traverse(
-        &self,
-        curr_vertex: Option<&ArcVertex<T>>,
-        target_value: T,
-        path: Vec<Edge<T>>,
-        visited: &mut HashSet<T>,
-    ) -> Option<Vec<Edge<T>>> {
-        let vertex = curr_vertex?.get_vertex();
+    /// Traverse the graph via BFS looking for the vertex containing the target value.
+    /// Returns a vector of [`Edge`][Edge]s forming a path between the two vertices.
+    fn find_path(&self, starting_value: T, target_value: T) -> Option<Vec<Edge<T>>> {
+        // Tracker for visited vertices. We keep a set of seen values rather than vertices
+        // themselves, because hashing vertices has some additional challenges
+        // https://github.com/rust-lang/rust/issues/39128.
+        let mut visited: HashSet<T> = HashSet::new();
 
-        if vertex.value == target_value {
-            // found the target
-            return Some(path);
-        }
+        // queue for storing vertices and the path to them
+        let mut queue = VecDeque::new();
 
-        if vertex.edges.is_empty() {
-            // target does not exist in the current branch
-            return None;
-        }
+        let starting_vertex = self.vertices.get(&starting_value)?.clone();
+        // our starting path is empty, because we're storing edge, and we haven't traversed any yet
+        let starting_path = Vec::new();
 
-        let curr_value = vertex.value.clone();
-        if visited.contains(&curr_value) {
-            // detected a cycle in the current branch before getting to the target value
-            return None;
-        }
+        queue.push_front((starting_vertex, starting_path));
 
-        visited.insert(curr_value);
+        while let Some((curr_vertex, path)) = queue.pop_back() {
+            let vertex_lock = curr_vertex.read_lock();
+            visited.insert(vertex_lock.value.clone());
 
-        // TODO: remove recursion, which makes things rather confusing and runs the risk of stack overflow for larger graphs
-        for edge in &vertex.edges {
-            let mut updated_path = path.clone();
-            updated_path.push(edge.clone());
-            if let Some(possible_path) = self.traverse(
-                Some(&edge.into()),
-                target_value.clone(),
-                updated_path,
-                visited,
-            ) {
-                return Some(possible_path);
+            if vertex_lock.value == target_value {
+                // found the target
+                return Some(path);
             }
+
+            vertex_lock.edges.iter().for_each(|edge| {
+                let next: ArcVertex<T> = edge.into();
+                let next_value = &next.read_lock().value;
+
+                if !visited.contains(next_value) {
+                    let new_path: Vec<Edge<T>> =
+                        path.iter().cloned().chain(once(edge.clone())).collect();
+                    queue.push_front((next.clone(), new_path));
+                }
+            });
         }
 
         None
     }
 
-    fn find_path(&self, from: T, to: T) -> Option<Vec<Edge<T>>> {
-        let starting_vertex = self.vertices.get(&from);
-        self.traverse(starting_vertex, to, Vec::new(), &mut HashSet::new())
-    }
-
+    /// Helper method for finding a path between two values and multiplying the provided value by
+    /// all the weights in the path
     pub fn fold_path(&self, from: T, to: T, value: f32) -> Option<f32> {
         self.find_path(from, to)?
             .iter()
